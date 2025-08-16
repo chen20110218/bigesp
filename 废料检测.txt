@@ -1,0 +1,209 @@
+-- 高级废料透视脚本
+-- 支持全图扫描、距离显示和文字标签
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+
+-- 配置参数
+local config = {
+    maxDistance = 2000, -- 最大检测距离
+    highlightColor = Color3.fromRGB(0, 255, 0), -- 高亮颜色
+    highlightTransparency = 0.3, -- 透明度
+    scanInterval = 1, -- 全图扫描间隔(秒)
+    updateInterval = 0.1, -- 更新间隔(秒)
+    labelColor = Color3.fromRGB(255, 255, 255), -- 标签颜色
+    labelSize = 15, -- 标签字体大小
+    maxLabels = 50, -- 最大显示标签数量
+    tagPrefix = "[废料]", -- 标签前缀
+    scanKey = Enum.KeyCode.T -- 全图扫描快捷键
+}
+
+-- 本地变量
+local player = Players.LocalPlayer
+local character = player.Character or player.CharacterAdded:Wait()
+local humanoidRootPart = character:WaitForChild("HumanoidRootPart")
+local camera = workspace.CurrentCamera
+
+-- 存储已高亮的废料
+local highlightedTrash = {}
+local trashCache = {}
+local lastScanTime = 0
+local scanning = false
+
+-- 创建标签函数
+local function createLabel(trashPart, distance)
+    if not trashPart:FindFirstChild("TrashLabel") then
+        local billboard = Instance.new("BillboardGui")
+        billboard.Name = "TrashLabel"
+        billboard.AlwaysOnTop = true
+        billboard.Size = UDim2.new(0, 200, 0, 50)
+        billboard.StudsOffset = Vector3.new(0, 2, 0)
+        billboard.Adornee = trashPart
+        billboard.MaxDistance = config.maxDistance
+        
+        local textLabel = Instance.new("TextLabel")
+        textLabel.Size = UDim2.new(1, 0, 1, 0)
+        textLabel.BackgroundTransparency = 1
+        textLabel.Text = string.format("%s\n%.1f米", config.tagPrefix, distance)
+        textLabel.TextColor3 = config.labelColor
+        textLabel.TextSize = config.labelSize
+        textLabel.Font = Enum.Font.SourceSansBold
+        textLabel.TextStrokeTransparency = 0.5
+        textLabel.TextStrokeColor3 = Color3.new(0, 0, 0)
+        
+        textLabel.Parent = billboard
+        billboard.Parent = trashPart
+        
+        return billboard
+    end
+    return trashPart:FindFirstChild("TrashLabel")
+end
+
+-- 更新标签距离
+local function updateLabel(trashPart, distance)
+    local label = trashPart:FindFirstChild("TrashLabel")
+    if label then
+        label.TextLabel.Text = string.format("%s\n%.1f米", config.tagPrefix, distance)
+        
+        -- 根据距离调整标签大小
+        local scale = math.clamp(1 - (distance / config.maxDistance) * 0.5, 0.5, 1)
+        label.TextLabel.TextSize = config.labelSize * scale
+    end
+end
+
+-- 高亮废料的函数
+local function highlightTrash(trashPart)
+    if not highlightedTrash[trashPart] then
+        local highlight = Instance.new("Highlight")
+        highlight.Name = "TrashHighlight"
+        highlight.FillColor = config.highlightColor
+        highlight.FillTransparency = config.highlightTransparency
+        highlight.OutlineColor = config.highlightColor
+        highlight.OutlineTransparency = 0
+        highlight.Adornee = trashPart
+        highlight.Parent = trashPart
+        
+        highlightedTrash[trashPart] = highlight
+    end
+end
+
+-- 全图扫描废料
+local function fullScan()
+    if scanning then return end
+    scanning = true
+    
+    local startTime = os.clock()
+    trashCache = {}
+    
+    -- 扩展搜索条件
+    local trashKeywords = {"trash", "scrap", "junk", "waste", "debris", "rubbish", "garbage", "废料", "垃圾"}
+    
+    -- 扫描工作区
+    for _, obj in ipairs(workspace:GetDescendants()) do
+        if obj:IsA("BasePart") then
+            local lowerName = obj.Name:lower()
+            for _, keyword in ipairs(trashKeywords) do
+                if lowerName:find(keyword) then
+                    table.insert(trashCache, obj)
+                    break
+                end
+            end
+        end
+    end
+    
+    -- 扫描模型
+    for _, model in ipairs(workspace:GetChildren()) do
+        if model:IsA("Model") then
+            local lowerName = model.Name:lower()
+            for _, keyword in ipairs(trashKeywords) do
+                if lowerName:find(keyword) then
+                    for _, part in ipairs(model:GetDescendants()) do
+                        if part:IsA("BasePart") then
+                            table.insert(trashCache, part)
+                        end
+                    end
+                    break
+                end
+            end
+        end
+    end
+    
+    scanning = false
+    lastScanTime = os.clock()
+    print(string.format("全图扫描完成，找到 %d 个废料，耗时 %.2f 秒", #trashCache, os.clock() - startTime))
+end
+
+-- 清除不再需要的废料高亮
+local function cleanUpHighlights(currentTrash)
+    for trashPart, highlight in pairs(highlightedTrash) do
+        if not table.find(currentTrash, trashPart) then
+            if highlight then highlight:Destroy() end
+            local label = trashPart:FindFirstChild("TrashLabel")
+            if label then label:Destroy() end
+            highlightedTrash[trashPart] = nil
+        end
+    end
+end
+
+-- 更新附近的废料显示
+local function updateNearbyTrash()
+    if not humanoidRootPart or not humanoidRootPart:IsDescendantOf(workspace) then
+        return
+    end
+    
+    local currentTime = os.clock()
+    if currentTime - lastScanTime > config.scanInterval then
+        task.spawn(fullScan)
+    end
+    
+    local nearbyTrash = {}
+    local playerPos = humanoidRootPart.Position
+    
+    -- 按距离排序
+    table.sort(trashCache, function(a, b)
+        return (playerPos - a.Position).Magnitude < (playerPos - b.Position).Magnitude
+    end)
+    
+    -- 只显示最近的maxLabels个废料
+    local displayCount = 0
+    for _, trashPart in ipairs(trashCache) do
+        if displayCount >= config.maxLabels then break end
+        
+        local distance = (playerPos - trashPart.Position).Magnitude
+        if distance <= config.maxDistance then
+            table.insert(nearbyTrash, trashPart)
+            highlightTrash(trashPart)
+            local label = createLabel(trashPart, distance)
+            updateLabel(trashPart, distance)
+            displayCount += 1
+        end
+    end
+    
+    cleanUpHighlights(nearbyTrash)
+end
+
+-- 设置快捷键
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if not gameProcessed and input.KeyCode == config.scanKey then
+        fullScan()
+    end
+end)
+
+-- 主循环
+RunService.Heartbeat:Connect(function()
+    updateNearbyTrash()
+end)
+
+-- 玩家重生时重新获取角色
+player.CharacterAdded:Connect(function(newChar)
+    character = newChar
+    humanoidRootPart = newChar:WaitForChild("HumanoidRootPart")
+end)
+
+-- 初始扫描
+task.spawn(fullScan)
+
+print("高级废料透视脚本已激活")
+print(string.format("按 %s 键手动触发全图扫描", config.scanKey.Name))
